@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    /* "Paper" color for readability, derived from your Academic Blue theme */
+    @apply bg-paper text-gray-800 antialiased font-sans;
+  }
+}
