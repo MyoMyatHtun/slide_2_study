@@ -19,6 +19,11 @@ except ImportError:
 app = FastAPI()
 
 
+@app.get("/")
+def root() -> dict[str, str]:
+    return {"message": "Slide2Study backend is online"}
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {
