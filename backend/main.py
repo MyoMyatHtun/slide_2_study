@@ -4,6 +4,7 @@ from pydantic import BaseModel
 import fitz  # PyMuPDF
 import re
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+ 
 
 app = FastAPI()
 
@@ -44,6 +45,8 @@ class ExtractResponse(BaseModel):
 # ==========================================
 
 # Regex patterns for mathematical formulas
+# Regex for URLs and links
+URL_PATTERN = r'https?://\S+|www\.\S+'
 MATH_PATTERNS = [
     r'\$[^$]+\$',                     # LaTeX inline math: $...$
     r'\\[a-zA-Z]+',                   # LaTeX commands: \alpha, \sum
@@ -66,19 +69,18 @@ MATH_SYMBOLS = set('∫∑∏√∂∞≈≠≤≥×÷±∈∉⊂⊆∪∩∀∃
 def extract_words_and_formulas(pdf_bytes: bytes) -> str:
     """
     Extract only natural language words and mathematical formulas from a PDF.
-    Ignores page numbers, headers, footers, tables, and other non‑content.
+    Cleans out page numbers, headers, and reference URLs (https/www).
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     all_content = []
-
+    
     for page_num in range(len(doc)):
         page = doc[page_num]
-        # Get text blocks with layout info (position, font, etc.)
         blocks = page.get_text("dict")["blocks"]
 
         for block in blocks:
             if "lines" not in block:
-                continue  # Skip images/diagrams
+                continue
 
             for line in block["lines"]:
                 line_text = ""
@@ -87,41 +89,35 @@ def extract_words_and_formulas(pdf_bytes: bytes) -> str:
                     if not text:
                         continue
 
-                    # Skip page numbers (short numbers near top/bottom)
+                    # 1. Skip page numbers (position-based heuristic)
                     if text.isdigit() and len(text) <= 4:
                         bbox = span["bbox"]
-                        page_height = page.rect.height
-                        if bbox[1] < 50 or bbox[3] > page_height - 50:
+                        if bbox[1] < 50 or bbox[3] > page.rect.height - 50:
                             continue
 
-                    # Check if the span contains math
-                    is_math = False
-                    if any(ch in text for ch in MATH_SYMBOLS):
-                        is_math = True
-                    elif MATH_REGEX.search(text):
-                        is_math = True
-                    # Heuristic: math often uses italic fonts
-                    elif "italic" in span.get("font", "").lower():
-                        is_math = True
+                    # 2. Identify Math (symbols, regex patterns, or italics)
+                    is_math = (any(ch in text for ch in MATH_SYMBOLS) or 
+                               MATH_REGEX.search(text) or 
+                               "italic" in span.get("font", "").lower())
 
                     if is_math:
-                        # Keep the entire span as math
                         line_text += text + " "
                     else:
-                        # Extract only words (letters, apostrophes, hyphens)
+                        # 3. Extract regular words only
                         words = re.findall(r"[a-zA-Z']+(?:-[a-zA-Z]+)*", text)
                         if words:
                             line_text += " ".join(words) + " "
 
-                # Skip very short lines that are likely headers
+                # 4. Filter out very short lines (likely headers/noise)
                 if line_text.strip() and len(line_text.split()) > 3:
                     all_content.append(line_text.strip())
 
-    # Join all lines and clean up extra spaces
-    raw_text = " ".join(all_content)
-    cleaned = re.sub(r'\s+', ' ', raw_text).strip()
+    # 5. Final Cleaning: Join, Remove URLs, and Fix Whitespace
+    full_text = " ".join(all_content)
+    full_text = re.sub(URL_PATTERN, '', full_text) # Strip https/www links
+    cleaned = re.sub(r'\s+', ' ', full_text).strip()
+    
     return cleaned
-
 # ==========================================
 # AI SUMMARIZATION
 # ==========================================
@@ -192,3 +188,24 @@ async def extract_pdf_only(file: UploadFile = File(...)):
         return ExtractResponse(text=extracted, wordCount=word_count)
     except Exception as e:
         raise HTTPException(500, f"Error extracting PDF: {str(e)}")
+    
+from tokenizer import whitespace_tokenize, split_punctuation, analyze_and_export
+
+@app.post("/extract-pdf")
+async def extract_pdf_only(file: UploadFile = File(...)):
+    contents = await file.read()
+    text = extract_words_and_formulas(contents)
+    
+    # 1. Process tokens
+    tokens = whitespace_tokenize(text)
+    tokens = split_punctuation(tokens)
+    
+    # 2. Generate visualization data
+    viz_data = analyze_and_export(tokens, file.filename)
+    
+    # 3. Send both the text AND the visualization stats to React
+    return {
+        "text": text,
+        "wordCount": viz_data["total_tokens"],
+        "visualization": viz_data # React can now use viz_data.top_tokens for charts
+    }
