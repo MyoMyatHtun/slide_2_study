@@ -8,7 +8,10 @@ import json
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any, Optional
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 try:
     from .tokenizer import whitespace_tokenize, split_punctuation, analyze_and_export
@@ -20,7 +23,10 @@ app = FastAPI()
 
 
 @app.get("/")
-def root() -> dict[str, str]:
+def root() -> Any:
+    index_file = FRONTEND_DIST / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
     return {"message": "Slide2Study backend is online"}
 
 
@@ -50,6 +56,7 @@ HF_MODEL_ID = os.getenv("HF_MODEL_ID", "dxskywalker/s2s_summarizer")
 HF_TOKEN = os.getenv("HF_TOKEN")
 HF_API_URL = os.getenv("HF_API_URL", f"https://api-inference.huggingface.co/models/{HF_MODEL_ID}")
 HF_TIMEOUT_SECONDS = int(os.getenv("HF_TIMEOUT_SECONDS", "90"))
+FRONTEND_DIST = Path(__file__).resolve().parent.parent / "dist"
 
 # ==========================================
 # DATA MODELS
@@ -273,3 +280,17 @@ async def extract_pdf_only(file: UploadFile = File(...)):
         )
     except Exception as e:
         raise HTTPException(500, f"Error extracting PDF: {str(e)}")
+
+
+if FRONTEND_DIST.exists():
+    assets_dir = FRONTEND_DIST / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def serve_spa(full_path: str):
+        # Serve direct files (favicon, manifests, etc.) and fallback to index for client routes.
+        requested = FRONTEND_DIST / full_path
+        if requested.is_file():
+            return FileResponse(requested)
+        return FileResponse(FRONTEND_DIST / "index.html")

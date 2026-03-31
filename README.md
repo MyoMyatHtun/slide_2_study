@@ -75,6 +75,25 @@ Create two Railway services (recommended):
 3. Variable:
    - `VITE_API_BASE_URL=https://<your-backend-domain>`
 
+## Railway Single-Service Option (One URL for UI + API)
+
+If you want both UI and API on one Railway URL:
+
+1. Create one Railway service using the project root as `Root Directory`.
+2. Railway will use root `Procfile`:
+   - `web: sh -c "npm ci && npm run build && uvicorn backend.main:app --host 0.0.0.0 --port $PORT"`
+3. Set backend variables on that same service:
+   - `HF_TOKEN`
+   - `HF_MODEL_ID=dxskywalker/s2s_summarizer`
+   - `HF_TIMEOUT_SECONDS=90`
+   - `CORS_ORIGINS=https://<your-railway-domain>`
+
+FastAPI serves `dist/` when present, so:
+
+1. `/` serves the React app
+2. API routes like `/generate-from-text` continue to work
+3. `/docs` still opens Swagger docs
+
 ## Hugging Face Model Upload
 
 ```powershell
