@@ -5,7 +5,11 @@ import fitz  # PyMuPDF
 import re
 import os
 from typing import Any, Optional
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+try:
+    from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+except Exception:
+    AutoModelForSeq2SeqLM = None
+    AutoTokenizer = None
 
 try:
     from .tokenizer import whitespace_tokenize, split_punctuation, analyze_and_export
@@ -39,6 +43,10 @@ def ensure_model_loaded() -> None:
 
     if tokenizer is not None and model is not None:
         return
+
+    if AutoTokenizer is None or AutoModelForSeq2SeqLM is None:
+        model_load_error = "transformers/torch dependencies are not available in this deployment"
+        raise HTTPException(503, f"Model unavailable: {model_load_error}")
 
     if model_load_error is not None:
         raise HTTPException(503, f"Model unavailable: {model_load_error}")
