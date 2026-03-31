@@ -3,7 +3,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import fitz  # PyMuPDF
 import re
+import os
+from typing import Any, Optional
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+
+try:
+    from .tokenizer import whitespace_tokenize, split_punctuation, analyze_and_export
+except ImportError:
+    from tokenizer import whitespace_tokenize, split_punctuation, analyze_and_export
  
 
 app = FastAPI()
@@ -18,13 +25,32 @@ app.add_middleware(
 )
 
 # ==========================================
-# LOAD MODEL ON STARTUP
+# MODEL CONFIGURATION
 # ==========================================
-MODEL_PATH = "./model"
-print("Loading model...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_PATH)
-print("Model loaded.")
+MODEL_PATH = os.getenv("MODEL_PATH", "./model")
+tokenizer = None
+model = None
+model_load_error = None
+
+
+def ensure_model_loaded() -> None:
+    """Lazy-load the model so app startup does not crash when model files are unavailable."""
+    global tokenizer, model, model_load_error
+
+    if tokenizer is not None and model is not None:
+        return
+
+    if model_load_error is not None:
+        raise HTTPException(503, f"Model unavailable: {model_load_error}")
+
+    try:
+        print(f"Loading model from {MODEL_PATH}...")
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+        model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_PATH)
+        print("Model loaded.")
+    except Exception as exc:
+        model_load_error = str(exc)
+        raise HTTPException(503, f"Model unavailable: {model_load_error}")
 
 # ==========================================
 # DATA MODELS
@@ -39,6 +65,7 @@ class TextInput(BaseModel):
 class ExtractResponse(BaseModel):
     text: str
     wordCount: int
+    visualization: Optional[dict[str, Any]] = None
 
 # ==========================================
 # PDF EXTRACTION (WORDS + FORMULAS ONLY)
@@ -123,6 +150,8 @@ def extract_words_and_formulas(pdf_bytes: bytes) -> str:
 # ==========================================
 def summarize_text(content: str) -> SummaryResponse:
     """Generate a summary using the loaded model."""
+    ensure_model_loaded()
+
     inputs = tokenizer(content, return_tensors="pt", max_length=1024, truncation=True)
     input_len = inputs["input_ids"].shape[1]
 
@@ -175,37 +204,24 @@ async def generate_from_pdf(file: UploadFile = File(...)):
 
 @app.post("/extract-pdf", response_model=ExtractResponse)
 async def extract_pdf_only(file: UploadFile = File(...)):
-    """Extract only words and formulas from a PDF (no summary)."""
+    """Extract words/formulas from a PDF and return token visualization metadata."""
     if not file.filename.endswith(".pdf"):
         raise HTTPException(400, "File must be a PDF")
 
     try:
         contents = await file.read()
-        extracted = extract_words_and_formulas(contents)
-        if not extracted:
+        text = extract_words_and_formulas(contents)
+        if not text:
             raise HTTPException(400, "No usable text or formulas found in PDF.")
-        word_count = len(extracted.split())
-        return ExtractResponse(text=extracted, wordCount=word_count)
+
+        tokens = whitespace_tokenize(text)
+        tokens = split_punctuation(tokens)
+        viz_data = analyze_and_export(tokens, file.filename)
+
+        return ExtractResponse(
+            text=text,
+            wordCount=viz_data["total_tokens"],
+            visualization=viz_data,
+        )
     except Exception as e:
         raise HTTPException(500, f"Error extracting PDF: {str(e)}")
-    
-from tokenizer import whitespace_tokenize, split_punctuation, analyze_and_export
-
-@app.post("/extract-pdf")
-async def extract_pdf_only(file: UploadFile = File(...)):
-    contents = await file.read()
-    text = extract_words_and_formulas(contents)
-    
-    # 1. Process tokens
-    tokens = whitespace_tokenize(text)
-    tokens = split_punctuation(tokens)
-    
-    # 2. Generate visualization data
-    viz_data = analyze_and_export(tokens, file.filename)
-    
-    # 3. Send both the text AND the visualization stats to React
-    return {
-        "text": text,
-        "wordCount": viz_data["total_tokens"],
-        "visualization": viz_data # React can now use viz_data.top_tokens for charts
-    }
