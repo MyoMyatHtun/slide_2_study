@@ -1,75 +1,84 @@
-# React + TypeScript + Vite
+# Slide2Study
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Slide2Study is a full-stack app that extracts text from lecture PDFs and generates study summaries.
 
-Currently, two official plugins are available:
+## Hybrid Deployment (Railway + Hugging Face)
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+This project is configured for a hybrid architecture:
 
-## React Compiler
+1. Railway hosts the app (FastAPI backend + React frontend).
+2. Hugging Face hosts the summarization model (`dxskywalker/s2s_summarizer`).
+3. FastAPI calls Hugging Face Inference API using `HF_TOKEN`.
 
-The React Compiler is enabled on this template. See [this documentation](https://react.dev/learn/react-compiler) for more information.
+This avoids deploying a 1.5 GB model directly on low-memory free-tier hosts.
 
-Note: This will impact Vite dev & build performances.
+## Local Development
 
-## Expanding the ESLint configuration
+### Frontend
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Optional frontend env (`.env` in project root):
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+```env
+VITE_API_BASE_URL=http://127.0.0.1:8000
+```
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+### Backend
+
+```bash
+cd backend
+pip install -r requirements.txt
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Backend environment variables:
+
+```env
+HF_TOKEN=your_huggingface_token
+HF_MODEL_ID=dxskywalker/s2s_summarizer
+HF_TIMEOUT_SECONDS=90
+CORS_ORIGINS=http://localhost:5173
+```
+
+Health check endpoint:
+
+```txt
+GET /health
+```
+
+## Railway Deployment
+
+Create two Railway services (recommended):
+
+1. `slide2study-backend` (root directory: `backend`)
+2. `slide2study-frontend` (root directory: project root)
+
+### Backend service settings
+
+1. Root directory: `backend`
+2. Build command: `pip install -r requirements.txt`
+3. Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+4. Variables:
+   - `HF_TOKEN`
+   - `HF_MODEL_ID=dxskywalker/s2s_summarizer`
+   - `HF_TIMEOUT_SECONDS=90`
+   - `CORS_ORIGINS=https://<your-frontend-domain>`
+
+### Frontend service settings
+
+1. Build command: `npm ci && npm run build`
+2. Start command: `npm run preview -- --host 0.0.0.0 --port $PORT`
+3. Variable:
+   - `VITE_API_BASE_URL=https://<your-backend-domain>`
+
+## Hugging Face Model Upload
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://hf.co/cli/install.ps1 | iex"
+hf auth login
+hf upload dxskywalker/s2s_summarizer .
 ```

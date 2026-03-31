@@ -2,6 +2,8 @@ import { useState, useEffect, useMemo } from 'react';
 import { useLocation, useNavigate, Link } from 'react-router-dom';
 import { ChevronLeft, Sparkles, FileText, Loader2, Clock, Hash } from 'lucide-react';
 
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '');
+
 export function Preview() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -39,7 +41,7 @@ export function Preview() {
         setSecondsElapsed((prev) => prev + 1);
       }, 1000);
 
-      const response = await fetch('http://127.0.0.1:8000/generate-from-text', {
+      const response = await fetch(`${API_BASE_URL}/generate-from-text`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: text }),

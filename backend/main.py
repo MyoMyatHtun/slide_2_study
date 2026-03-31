@@ -4,12 +4,11 @@ from pydantic import BaseModel
 import fitz  # PyMuPDF
 import re
 import os
+import json
+import time
+import urllib.error
+import urllib.request
 from typing import Any, Optional
-try:
-    from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-except Exception:
-    AutoModelForSeq2SeqLM = None
-    AutoTokenizer = None
 
 try:
     from .tokenizer import whitespace_tokenize, split_punctuation, analyze_and_export
@@ -19,46 +18,33 @@ except ImportError:
 
 app = FastAPI()
 
+
+@app.get("/health")
+def health() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "modelProvider": "huggingface",
+        "modelId": HF_MODEL_ID,
+        "tokenConfigured": bool(HF_TOKEN),
+    }
+
 # CORS for React frontend (adjust origin if needed)
+CORS_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ==========================================
-# MODEL CONFIGURATION
+# HUGGING FACE INFERENCE CONFIGURATION
 # ==========================================
-MODEL_PATH = os.getenv("MODEL_PATH", "./model")
-tokenizer = None
-model = None
-model_load_error = None
-
-
-def ensure_model_loaded() -> None:
-    """Lazy-load the model so app startup does not crash when model files are unavailable."""
-    global tokenizer, model, model_load_error
-
-    if tokenizer is not None and model is not None:
-        return
-
-    if AutoTokenizer is None or AutoModelForSeq2SeqLM is None:
-        model_load_error = "transformers/torch dependencies are not available in this deployment"
-        raise HTTPException(503, f"Model unavailable: {model_load_error}")
-
-    if model_load_error is not None:
-        raise HTTPException(503, f"Model unavailable: {model_load_error}")
-
-    try:
-        print(f"Loading model from {MODEL_PATH}...")
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-        model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_PATH)
-        print("Model loaded.")
-    except Exception as exc:
-        model_load_error = str(exc)
-        raise HTTPException(503, f"Model unavailable: {model_load_error}")
+HF_MODEL_ID = os.getenv("HF_MODEL_ID", "dxskywalker/s2s_summarizer")
+HF_TOKEN = os.getenv("HF_TOKEN")
+HF_API_URL = os.getenv("HF_API_URL", f"https://api-inference.huggingface.co/models/{HF_MODEL_ID}")
+HF_TIMEOUT_SECONDS = int(os.getenv("HF_TIMEOUT_SECONDS", "90"))
 
 # ==========================================
 # DATA MODELS
@@ -157,34 +143,83 @@ def extract_words_and_formulas(pdf_bytes: bytes) -> str:
 # AI SUMMARIZATION
 # ==========================================
 def summarize_text(content: str) -> SummaryResponse:
-    """Generate a summary using the loaded model."""
-    ensure_model_loaded()
+    """Generate a summary through the Hugging Face Inference API."""
+    if not HF_TOKEN:
+        raise HTTPException(503, "HF_TOKEN is missing. Set Railway environment variable HF_TOKEN.")
 
-    inputs = tokenizer(content, return_tensors="pt", max_length=1024, truncation=True)
-    input_len = inputs["input_ids"].shape[1]
+    prompt_words = len(content.split())
+    min_len = max(60, int(prompt_words * 0.25))
+    max_len = min(350, max(min_len + 20, int(prompt_words * 0.55)))
 
-    # Dynamic limits: summary length between 30% and 60% of input, capped at 512
-    min_len = max(100, int(input_len * 0.3))
-    max_len = min(512, int(input_len * 0.6))
+    payload = {
+        "inputs": content,
+        "parameters": {
+            "min_length": min_len,
+            "max_length": max_len,
+            "num_beams": 4,
+            "do_sample": False,
+            "repetition_penalty": 1.2,
+            "return_full_text": False,
+        },
+        "options": {
+            "wait_for_model": True,
+            "use_cache": True,
+        },
+    }
 
-    summary_ids = model.generate(
-        inputs["input_ids"],
-        min_length=min_len,
-        max_length=max_len,
-        length_penalty=2.5,
-        num_beams=5,
-        no_repeat_ngram_size=3,
-        early_stopping=True
+    req = urllib.request.Request(
+        HF_API_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {HF_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
     )
 
-    summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
-    # Ensure we stop at a sentence boundary
+    start = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=HF_TIMEOUT_SECONDS) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        raise HTTPException(502, f"Hugging Face API error ({exc.code}): {detail[:300]}")
+    except urllib.error.URLError as exc:
+        raise HTTPException(503, f"Cannot reach Hugging Face API: {exc.reason}")
+    except Exception as exc:
+        raise HTTPException(500, f"Unexpected inference error: {exc}")
+
+    elapsed_ms = int((time.time() - start) * 1000)
+    print(f"HF inference completed in {elapsed_ms} ms")
+
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        raise HTTPException(502, "Invalid JSON response from Hugging Face API")
+
+    if isinstance(parsed, dict) and parsed.get("error"):
+        error_text = str(parsed.get("error"))
+        if "currently loading" in error_text.lower():
+            raise HTTPException(503, "Model is warming up on Hugging Face. Retry in a few seconds.")
+        raise HTTPException(502, f"Hugging Face returned an error: {error_text}")
+
+    summary = ""
+    if isinstance(parsed, list) and parsed:
+        first = parsed[0]
+        if isinstance(first, dict):
+            summary = first.get("summary_text") or first.get("generated_text") or ""
+    elif isinstance(parsed, dict):
+        summary = parsed.get("summary_text") or parsed.get("generated_text") or ""
+
+    summary = re.sub(r'\s+', ' ', summary).strip()
+    if not summary:
+        raise HTTPException(502, "No summary_text returned by Hugging Face API")
+
     match = re.search(r'^(.*[.!?])', summary)
     if match:
         summary = match.group(1)
 
-    word_count = len(summary.split())
-    return SummaryResponse(summary=summary, wordCount=word_count)
+    return SummaryResponse(summary=summary, wordCount=len(summary.split()))
 
 # ==========================================
 # ENDPOINTS
